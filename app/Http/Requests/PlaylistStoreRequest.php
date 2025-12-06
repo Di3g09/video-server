@@ -28,4 +28,17 @@ class PlaylistStoreRequest extends FormRequest
             'name.max'      => 'El nombre no puede superar los 150 caracteres.',
         ];
     }
+
+    public function withValidator($validator)
+    {
+        $validator->after(function ($validator) {
+            if ($this->boolean('is_default')) {
+                $validator->errors()->add(
+                    'is_default',
+                    'No puedes marcar la playlist como predeterminada al crearla. ' .
+                        'Primero guárdala y luego agrega al menos un video activo.'
+                );
+            }
+        });
+    }
 }

@@ -12,11 +12,16 @@ use App\Models\MediaItem;
 use App\Models\PlaylistItem;
 use Illuminate\Http\Request;
 
+use App\Services\PlaylistSyncService;
+
 
 class PlaylistController extends Controller
 {
-    public function __construct()
+    protected PlaylistSyncService $syncService;
+
+    public function __construct(PlaylistSyncService $syncService)
     {
+        $this->syncService = $syncService;
         //$this->middleware('auth');
     }
 
@@ -44,29 +49,65 @@ class PlaylistController extends Controller
         $isDefault = $request->boolean('is_default');
         $active    = $request->boolean('active');
 
-        DB::transaction(function () use (&$playlist, $data, $isDefault, $active) {
+        if ($isDefault && ! $active) {
+            return back()
+                ->withErrors([
+                    'is_default' => 'Una playlist predeterminada debe estar activa. ' .
+                        'Marca la casilla "Activa" antes de establecerla como default.',
+                ])
+                ->withInput();
+        }
+
+        // Aquí capturamos directamente la playlist retornada por la transacción
+        $playlist = DB::transaction(function () use ($data, $isDefault, $active) {
+
             // Generar slug único
             $slug = $this->generateUniqueSlug($data['name']);
 
+            // Crear playlist base
             $playlist = Playlist::create([
                 'name'        => $data['name'],
                 'slug'        => $slug,
                 'description' => $data['description'] ?? null,
                 'active'      => $active,
-                'is_default'  => false, // ajustamos abajo si aplica
+                'is_default'  => false, // se ajusta abajo si aplica
             ]);
 
             if ($isDefault) {
                 // Dejar solo esta como default
                 Playlist::where('id', '!=', $playlist->id)->update(['is_default' => false]);
+
                 $playlist->is_default = true;
                 $playlist->save();
             }
+
+            // devolvemos la instancia creada/modificada
+            return $playlist;
         });
 
-        return redirect()
-            ->route('playlists.index')
-            ->with('success', 'Playlist creada correctamente.');
+        // ---- SINCRONIZACIÓN CON LA CARPETA DE TRANSMISIÓN ----
+        try {
+            if ($playlist->is_default && $playlist->active) {
+                $copiados = $this->syncService->syncDefault();
+
+                return redirect()
+                    ->route('playlists.index')
+                    ->with('success', "Playlist creada y sincronizada ({$copiados} videos copiados al canal).");
+            } else {
+                // Si no hay ninguna default activa ahora, limpiamos la carpeta
+                if (!Playlist::where('is_default', true)->where('active', true)->exists()) {
+                    $this->syncService->syncDefault(); // limpia carpeta
+                }
+
+                return redirect()
+                    ->route('playlists.index')
+                    ->with('success', 'Playlist creada correctamente.');
+            }
+        } catch (\Throwable $e) {
+            return redirect()
+                ->route('playlists.index')
+                ->with('error', 'Playlist creada, pero hubo un problema al sincronizar: ' . $e->getMessage());
+        }
     }
 
     // Formulario de edición
@@ -83,13 +124,68 @@ class PlaylistController extends Controller
         $isDefault = $request->boolean('is_default');
         $active    = $request->boolean('active');
 
-        DB::transaction(function () use (&$playlist, $data, $isDefault, $active) {
+        /**
+         * 1) Regla: no se puede dejar el sistema sin playlist default activa
+         * Si ESTA playlist es actualmente la default activa, entonces
+         * NO permitimos:
+         *  - quitarle el is_default, ni
+         *  - desactivarla (active = false)
+         * El cambio de default debe hacerse desde otra playlist.
+         */
+
+
+        // Regla: no se puede marcar como default si NO está activa
+        if ($isDefault && ! $active) {
+            return back()
+                ->withErrors([
+                    'is_default' => 'Una playlist predeterminada debe estar activa. ' .
+                        'Marca la casilla "Activa" antes de establecerla como default.',
+                ])
+                ->withInput();
+        }
+
+        if ($playlist->is_default && $playlist->active) {
+            if (! $isDefault || ! $active) {
+                return back()
+                    ->withErrors([
+                        'is_default' => 'No se puede dejar el sistema sin una playlist predeterminada. ' .
+                            'Primero establece otra playlist como default y luego modifica esta.',
+                    ])
+                    ->withInput();
+            }
+        }
+
+        /**
+         * 2) Si quieren marcarla como default (is_default = true),
+         *    validar que tenga al menos UN video activo.
+         */
+        if ($isDefault) {
+            $hasActiveItems = $playlist->hasActiveItems();
+
+            if (! $hasActiveItems) {
+                return back()
+                    ->withErrors([
+                        'is_default' => 'Para marcar esta playlist como predeterminada, ' .
+                            'debe contener al menos un video activo.',
+                    ])
+                    ->withInput();
+            }
+        }
+
+        // 3) Guardamos el estado anterior para saber si hay que resincronizar
+        $beforeDefault = $playlist->is_default;
+        $beforeActive  = $playlist->active;
+
+        // 4) Transacción para actualizar playlist
+        DB::transaction(function () use ($playlist, $data, $isDefault, $active) {
+
             // Regenerar slug solo si cambió el nombre
             $slug = $playlist->slug;
             if ($playlist->name !== $data['name']) {
                 $slug = $this->generateUniqueSlug($data['name'], $playlist->id);
             }
 
+            // Actualizar campos base
             $playlist->update([
                 'name'        => $data['name'],
                 'slug'        => $slug,
@@ -99,21 +195,48 @@ class PlaylistController extends Controller
 
             // Manejo de default único
             if ($isDefault) {
-                Playlist::where('id', '!=', $playlist->id)->update(['is_default' => false]);
+                Playlist::where('id', '!=', $playlist->id)
+                    ->update(['is_default' => false]);
+
                 $playlist->is_default = true;
                 $playlist->save();
             } else {
-                // Si desmarcan la casilla, esta playlist deja de ser default
+                // Si desmarcan la casilla y NO es la default única (caso anterior ya bloqueó),
+                // esta playlist deja de ser default
                 $playlist->is_default = false;
                 $playlist->save();
             }
         });
 
-        return redirect()
-            ->route('playlists.index')
-            ->with('success', 'Playlist actualizada correctamente.');
-    }
+        // 5) Ver si cambió algo relevante para la transmisión
+        $defaultChanged = $beforeDefault !== $playlist->is_default;
+        $activeChanged  = $beforeActive  !== $playlist->active;
 
+        try {
+            if ($defaultChanged || $activeChanged) {
+                $copiados = $this->syncService->syncDefault();
+
+                if ($copiados > 0) {
+                    return redirect()
+                        ->route('playlists.index')
+                        ->with('success', "Cambios guardados.");
+                }
+
+                return redirect()
+                    ->route('playlists.index')
+                    ->with('success', 'Cambios guardados. No hay playlist default activa o no tiene videos activos; transmisión vacía.');
+            }
+
+            // Si no cambió default ni active, no es necesario resincronizar
+            return redirect()
+                ->route('playlists.index')
+                ->with('success', 'Playlist actualizada correctamente.');
+        } catch (\Throwable $e) {
+            return redirect()
+                ->route('playlists.index')
+                ->with('error', 'Playlist actualizada, pero hubo un problema al sincronizar: ' . $e->getMessage());
+        }
+    }
     // Eliminar playlist
     public function destroy(Playlist $playlist)
     {
@@ -149,10 +272,31 @@ class PlaylistController extends Controller
 
     public function editItems(Playlist $playlist)
     {
-        // Traemos todos los videos disponibles
-        $mediaItems = MediaItem::orderBy('title')->get();
+        // 1) Items que YA están en la playlist, en el orden de 'position'
+        $playlistItems = $playlist->items()
+            ->with('mediaItem')
+            ->orderBy('position')
+            ->get();
 
-        // Mapa: media_item_id => position actual en esta playlist
+        $inPlaylistIds = $playlistItems->pluck('media_item_id')->all();
+
+        // 2) Videos que NO están en la playlist, ordenados por título
+        $otherMediaItems = MediaItem::whereNotIn('id', $inPlaylistIds)
+            ->orderBy('title')
+            ->get();
+
+        // 3) Armamos la colección final:
+        //    primero los de la playlist (en su orden),
+        //    luego el resto.
+        $mediaItems = $playlistItems
+            ->map(function ($playlistItem) {
+                return $playlistItem->mediaItem;
+            })
+            ->filter() // por si acaso
+            ->values()
+            ->merge($otherMediaItems);
+
+        // 4) Mapa: media_item_id => position actual en esta playlist
         $positions = $playlist->items()
             ->pluck('position', 'media_item_id')
             ->toArray();
@@ -161,9 +305,10 @@ class PlaylistController extends Controller
     }
 
 
+
     public function updateItems(Request $request, Playlist $playlist)
     {
-        // Validamos estructura básica
+        // 1) Validamos estructura básica de lo que viene del formulario
         $request->validate([
             'items' => ['nullable', 'array'],
             'items.*.include'  => ['nullable', 'boolean'],
@@ -172,7 +317,7 @@ class PlaylistController extends Controller
 
         $itemsInput = $request->input('items', []);
 
-        // Filtramos solo los que están marcados como "incluir"
+        // 2) Filtramos solo los que están marcados como "incluir"
         $selected = collect($itemsInput)
             ->filter(function ($row) {
                 return isset($row['include']) && (int)$row['include'] === 1;
@@ -184,7 +329,7 @@ class PlaylistController extends Controller
                 ];
             });
 
-        // Filtrar solo media_items que sigan activos
+        // 3) Filtrar solo media_items que sigan activos
         $ids = $selected->pluck('media_item_id')->all();
 
         if (!empty($ids)) {
@@ -198,13 +343,27 @@ class PlaylistController extends Controller
             });
         }
 
+        /**
+         * 4) Regla importante:
+         *    Si la playlist es DEFAULT + ACTIVA,
+         *    NO permitimos dejarla sin ningún video seleccionado.
+         */
+        if ($playlist->is_default && $playlist->active && $selected->isEmpty()) {
+            return back()
+                ->withErrors([
+                    'items' => 'La playlist predeterminada debe tener al menos un video activo. ' .
+                        'No puedes dejarla sin contenido.',
+                ])
+                ->withInput();
+        }
 
-        // Si no se seleccionó ningún video, simplemente limpiamos la playlist
+        // 5) Guardamos cambios en los items dentro de una transacción
         DB::transaction(function () use ($playlist, $selected) {
             // Eliminamos todo el contenido actual
             $playlist->items()->delete();
 
             if ($selected->isEmpty()) {
+                // Si no es default+activa, se permite dejarla vacía
                 return;
             }
 
@@ -213,7 +372,7 @@ class PlaylistController extends Controller
                 return $row['position'] ?? PHP_INT_MAX;
             });
 
-            $position = 1;
+            $position    = 1;
             $dataToInsert = [];
 
             foreach ($ordered as $row) {
@@ -230,6 +389,25 @@ class PlaylistController extends Controller
             PlaylistItem::insert($dataToInsert);
         });
 
+        /**
+         * 6) Sincronizar carpeta de transmisión SI esta playlist
+         *    es la default + activa (es decir, la que manda al canal).
+         */
+        if ($playlist->is_default && $playlist->active) {
+            try {
+                $copiados = $this->syncService->syncDefault();
+
+                return redirect()
+                    ->route('playlists.items.edit', $playlist)
+                    ->with('success', "Contenido de la playlist actualizado y sincronizado ({$copiados} videos).");
+            } catch (\Throwable $e) {
+                return redirect()
+                    ->route('playlists.items.edit', $playlist)
+                    ->with('error', 'Contenido actualizado, pero hubo un problema al sincronizar: ' . $e->getMessage());
+            }
+        }
+
+        // Si no es default, solo avisamos que se guardó el contenido
         return redirect()
             ->route('playlists.items.edit', $playlist)
             ->with('success', 'Contenido de la playlist actualizado correctamente.');

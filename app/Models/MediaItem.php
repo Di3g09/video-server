@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use App\Models\Playlist;
 
 class MediaItem extends Model
 {
@@ -32,6 +33,15 @@ class MediaItem extends Model
 
     public function playlists()
     {
-        return $this->belongsToMany(Playlist::class, 'playlist_items');
+        return $this->belongsToMany(Playlist::class, 'playlist_items')
+            ->withPivot('position');
+    }
+
+    public function isUsedInActiveDefaultPlaylist(): bool
+    {
+        return $this->playlists()
+            ->where('playlists.is_default', true)
+            ->where('playlists.active', true)
+            ->exists();
     }
 }

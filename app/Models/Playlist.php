@@ -38,4 +38,22 @@ class Playlist extends Model
     {
         return $this->hasMany(Schedule::class);
     }
+
+    public function scopeDefaultActive($query)
+    {
+        return $query->where('is_default', true)->where('active', true);
+    }
+    public function activeItems()
+    {
+        // items cuyo mediaItem está activo
+        return $this->items()
+            ->whereHas('mediaItem', function ($q) {
+                $q->where('active', true);
+            });
+    }
+
+    public function hasActiveItems(): bool
+    {
+        return $this->activeItems()->exists();
+    }
 }

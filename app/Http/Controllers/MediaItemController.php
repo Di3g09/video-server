@@ -67,10 +67,24 @@ class MediaItemController extends Controller
 
     public function update(MediaItemUpdateRequest $request, MediaItem $mediaItem)
     {
+        // 1) Qué valor quiere dejar el usuario en el checkbox "Activo"
+        $wantsActive = $request->boolean('active');
+
+        // 2) Regla: si quiere desactivarlo y el video está en una playlist default+activa → bloquear
+        if (! $wantsActive && $mediaItem->isUsedInActiveDefaultPlaylist()) {
+            return back()
+                ->withErrors([
+                    'active' => 'No puedes desactivar este video porque forma parte de la playlist predeterminada activa. ' .
+                        'Primero quítalo del contenido de esa playlist.',
+                ])
+                ->withInput();
+        }
+
+        // 3) Lógica normal de actualización
         $data = [
             'title'  => $request->input('title'),
             'notes'  => $request->input('notes'),
-            'active' => $request->boolean('active'),
+            'active' => $wantsActive,
         ];
 
         if ($request->hasFile('file')) {
@@ -106,9 +120,19 @@ class MediaItemController extends Controller
             ->with('success', 'Video actualizado correctamente.');
     }
 
+
     public function destroy(MediaItem $mediaItem)
     {
-        // Dejamos que la BD (FK) impida borrar si se usa en playlist
+        // Regla: no eliminar si está en una playlist default + activa
+        if ($mediaItem->isUsedInActiveDefaultPlaylist()) {
+            return back()
+                ->withErrors([
+                    'active' => 'No puedes eliminar este video porque forma parte de la playlist predeterminada activa. ' .
+                        'Primero quítalo del contenido de esa playlist.',
+                ]);
+        }
+
+        // Si quieres, aquí sigue aplicando la lógica de borrar el archivo físico
         if ($mediaItem->filename && Storage::disk('video_library')->exists($mediaItem->filename)) {
             Storage::disk('video_library')->delete($mediaItem->filename);
         }
