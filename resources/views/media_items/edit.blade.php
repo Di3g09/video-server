@@ -104,7 +104,7 @@
                                             </label>
                                             <p class="pl-1">o arrastra</p>
                                         </div>
-                                        <p class="text-xs leading-5 text-gray-600">MP4 hasta 200MB</p>
+                                        <p class="text-xs leading-5 text-gray-600">MP4 hasta 5GB</p>
                                     </div>
 
                                     {{-- Vista Previa del NUEVO Video --}}

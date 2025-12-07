@@ -25,7 +25,15 @@
                 <div class="p-6 sm:p-10">
                     <h3 class="text-lg font-medium text-gray-900 mb-6">Información del contenido</h3>
 
-                    <form action="{{ route('media-items.store') }}" method="POST" enctype="multipart/form-data" class="space-y-8">
+                    {{-- x-data para manejar el envío con progreso --}}
+                    <form
+                        action="{{ route('media-items.store') }}"
+                        method="POST"
+                        enctype="multipart/form-data"
+                        class="space-y-8"
+                        x-data="videoUploadForm()"
+                        @submit.prevent="submitForm($event)"
+                    >
                         @csrf
 
                         <div class="grid grid-cols-1 gap-y-6 gap-x-4 sm:grid-cols-6">
@@ -81,7 +89,7 @@
                                             </label>
                                             <p class="pl-1">o arrastra y suelta</p>
                                         </div>
-                                        <p class="text-xs leading-5 text-gray-600">MP4 hasta 200MB</p>
+                                        <p class="text-xs leading-5 text-gray-600">MP4 hasta 5GB</p>
                                     </div>
 
                                     {{-- Vista Previa del Video --}}
@@ -120,10 +128,35 @@
 
                         {{-- Botones de Acción --}}
                         <div class="flex items-center justify-end gap-x-4 pt-4 border-t border-gray-100">
-                            <a href="{{ route('media-items.index') }}" class="text-sm font-semibold leading-6 text-gray-900 hover:text-gray-700">Cancelar</a>
-                            <button type="submit" class="rounded-md bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 transition-all duration-200">
-                                Guardar Video
+                            <a href="{{ route('media-items.index') }}"
+                               class="text-sm font-semibold leading-6 text-gray-900 hover:text-gray-700"
+                               x-bind:class="{ 'pointer-events-none opacity-40': isUploading }">
+                                Cancelar
+                            </a>
+                            <button type="submit"
+                                    class="rounded-md bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 transition-all duration-200 flex items-center gap-2"
+                                    x-bind:disabled="isUploading">
+                                <span x-show="!isUploading">Guardar Video</span>
+                                <span x-show="isUploading" class="flex items-center gap-2">
+                                    <svg class="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none"
+                                         viewBox="0 0 24 24">
+                                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
+                                                stroke-width="4"></circle>
+                                        <path class="opacity-75" fill="currentColor"
+                                              d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+                                    </svg>
+                                    Subiendo...
+                                </span>
                             </button>
+                        </div>
+
+                        {{-- Barra de progreso --}}
+                        <div class="mt-4" x-show="isUploading">
+                            <div class="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+                                <div class="h-2 bg-indigo-600 rounded-full transition-all duration-100"
+                                     :style="`width: ${uploadProgress}%;`"></div>
+                            </div>
+                            <p class="mt-2 text-xs text-gray-500" x-text="uploadLabel"></p>
                         </div>
                     </form>
                 </div>
@@ -157,7 +190,7 @@
                 processFile(file) {
                     if (file) {
                         // Validación básica de tipo (opcional, pero recomendada para UX inmediata)
-                        if(file.type !== 'video/mp4') {
+                        if (file.type !== 'video/mp4') {
                             alert('Por favor, sube solo archivos MP4.');
                             this.clearPreview();
                             return;
@@ -171,6 +204,66 @@
                     this.previewUrl = null;
                     this.fileName = null;
                     this.$refs.input.value = ''; // Resetea el input file real
+                }
+            }
+        }
+
+        // Componente Alpine para manejar el envío con progreso
+        function videoUploadForm() {
+            return {
+                isUploading: false,
+                uploadProgress: 0,
+                uploadLabel: 'Preparando archivo...',
+
+                submitForm(event) {
+                    const form   = event.target;
+                    const url    = form.action;
+                    const method = form.method || 'POST';
+
+                    const formData = new FormData(form);
+
+                    this.isUploading    = true;
+                    this.uploadProgress = 0;
+                    this.uploadLabel    = '0%';
+
+                    const xhr = new XMLHttpRequest();
+                    xhr.open(method.toUpperCase(), url, true);
+
+                    // Laravel suele usar esto para detectar peticiones AJAX
+                    xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+
+                    // Progreso de subida
+                    xhr.upload.addEventListener('progress', (e) => {
+                        if (e.lengthComputable) {
+                            const percent = Math.round((e.loaded / e.total) * 100);
+                            this.uploadProgress = percent;
+                            this.uploadLabel    = `Subiendo video... ${percent}%`;
+                        } else {
+                            this.uploadLabel = 'Subiendo video...';
+                        }
+                    });
+
+                    // Al completar la petición, reemplazamos el documento
+                    xhr.addEventListener('load', () => {
+                        document.open();
+                        document.write(xhr.responseText);
+                        document.close();
+                    });
+
+                    xhr.addEventListener('error', () => {
+                        this.isUploading = false;
+                        this.uploadLabel = 'Error de red al subir el video.';
+
+                        if (window.Swal) {
+                            Swal.fire({
+                                icon: 'error',
+                                title: 'Error',
+                                text: 'Ocurrió un problema de conexión al subir el video.',
+                            });
+                        }
+                    });
+
+                    xhr.send(formData);
                 }
             }
         }

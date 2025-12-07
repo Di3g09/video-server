@@ -146,6 +146,10 @@ class MediaItemController extends Controller
 
     protected function getVideoDurationSeconds(string $absolutePath): ?int
     {
+        // Si estás en local y no te importa sacar la duración:
+        if (app()->environment('local')) {
+            return null;
+        }
         // Asumimos que ffprobe está en el PATH del sistema
         $cmd = 'ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 ' . escapeshellarg($absolutePath);
 

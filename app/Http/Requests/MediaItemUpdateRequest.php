@@ -19,7 +19,7 @@ class MediaItemUpdateRequest extends FormRequest
                 'nullable',
                 'file',
                 'mimetypes:video/mp4',
-                'max:204800',
+                'max:5242880',
             ],
             'notes' => ['nullable', 'string'],
             'active'=> ['sometimes', 'boolean'],
