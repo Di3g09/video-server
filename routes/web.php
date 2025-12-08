@@ -5,12 +5,33 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\MediaItemController;
 use App\Http\Controllers\PlaylistController;
 
+use App\Models\MediaItem;
+use App\Models\Playlist;
+
+
 Route::get('/', function () {
-    return view('welcome');
+    return redirect()->route('login');
 });
 
 Route::get('/dashboard', function () {
-    return view('dashboard');
+    $totalVideos      = MediaItem::count();
+    $activeVideos     = MediaItem::where('active', true)->count();
+    $totalPlaylists   = Playlist::count();
+    $defaultPlaylist  = Playlist::where('is_default', true)
+        ->where('active', true)
+        ->first();
+
+    $latestVideos = MediaItem::orderByDesc('created_at')
+        ->take(5)
+        ->get();
+
+    return view('dashboard', compact(
+        'totalVideos',
+        'activeVideos',
+        'totalPlaylists',
+        'defaultPlaylist',
+        'latestVideos'
+    ));
 })->middleware(['auth', 'verified'])->name('dashboard');
 
 Route::middleware('auth')->group(function () {
@@ -23,9 +44,9 @@ Route::middleware('auth')->group(function () {
         ->name('media-items.preview');
 
     Route::resource('media-items', MediaItemController::class)->except(['show']);
-    
+
     Route::resource('playlists', PlaylistController::class)->except(['show']);
-    
+
     Route::get('playlists/{playlist}/items', [PlaylistController::class, 'editItems'])
         ->name('playlists.items.edit');
 
@@ -33,4 +54,4 @@ Route::middleware('auth')->group(function () {
         ->name('playlists.items.update');
 });
 
-require __DIR__.'/auth.php';
+require __DIR__ . '/auth.php';
